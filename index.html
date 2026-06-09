@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>魔法手勢：星空大冒險 5.0 (雙模式精準版)</title>
+  <title>魔法手勢：星空大冒險 5.1 (雙模式精準平衡版)</title>
   
   <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.js"></script>
   <script src="https://unpkg.com/ml5@0.12.2/dist/ml5.min.js"></script>
@@ -86,6 +86,7 @@
     let screenShakeTime = 0;
     let glitchEffectTime = 0;
     let winParticles = []; // 通關彩帶特效
+    let invincibleTimer = 0; // 受傷後的無敵時間
     
     // 手指游標位置
     let cursorX = 320;
@@ -96,7 +97,7 @@
 
     // 手勢狀態
     let isHandOpen = false; 
-    let isFist = false;     // 新增：是否握拳
+    let isFist = false;     // 是否握拳
     let chargeLevel = 0;    
     let bossItem = null;    
     let challengeMode = false; 
@@ -201,7 +202,7 @@
     }
 
     // ==========================================
-    // 手部辨識核心 (升級版)
+    // 手部辨識核心 (放寬握拳判定)
     // ==========================================
     function updateHandTracking() {
        isHandOpen = false; 
@@ -236,7 +237,7 @@
 
         // 根據比例判定
         if (gestureRatio > 0.65) isHandOpen = true;
-        if (gestureRatio < 0.35) isFist = true;
+        if (gestureRatio < 0.48) isFist = true; // 放寬判定門檻，手指稍微收縮即判定為握拳
       }
       
       // 平滑移動 (防抖)
@@ -259,7 +260,7 @@
     // ==========================================
     function drawMenuScreen() {
       fill(255); textSize(40);
-      text("🚀 星空大冒險 5.0 🚀", width / 2, 80);
+      text("🚀 星空大冒險 5.1 🚀", width / 2, 80);
       textSize(20); fill(200, 255, 255);
       text("將手掌移動到選項上維持 2 秒以開始", width / 2, 130);
 
@@ -321,17 +322,21 @@
     }
 
     // ==========================================
-    // 遊戲模式二：隕石粉碎者 (握拳防禦生存)
+    // 遊戲模式二：隕石粉碎者 (加入無敵時間與難度調整)
     // ==========================================
     function playGame2() {
       if (gameTimer > 0) gameTimer--;
       if (gameTimer <= 0) triggerWin(); // 撐過30秒通關
 
-      // 生成大量隕石
-      if (frameCount % 20 === 0) {
+      // 遞減無敵時間
+      if (invincibleTimer > 0) invincibleTimer--;
+
+      // 降低生成頻率
+      if (frameCount % 30 === 0) {
         items.push({
           x: random(50, width - 50), y: -50, type: 'meteor',
-          speed: random(5, 10), size: random(50, 80), color: '#A0522D',
+          speed: random(4, 8), // 降低下落速度
+          size: random(50, 80), color: '#A0522D',
           rotation: random(TWO_PI), rotSpeed: random(-0.1, 0.1)
         });
       }
@@ -342,8 +347,8 @@
         push(); translate(item.x, item.y); rotate(item.rotation);
         textSize(item.size); text("🪨", 0, 0); pop();
         
-        // 碰撞判定
-        if (dist(cursorX, cursorY, item.x, item.y) < item.size/2 + 20) {
+        // 碰撞判定 (稍微縮小受擊範圍)
+        if (dist(cursorX, cursorY, item.x, item.y) < item.size/2 + 10) {
           if (isFist) {
             // 握拳粉碎！
             createBurstParticles(item.x, item.y, '#FFD700', 30);
@@ -351,11 +356,14 @@
             items.splice(i, 1);
             screenShakeTime = 2;
           } else {
-            // 沒握拳受傷
-            lives--;
-            createBurstParticles(item.x, item.y, '#FF0000', 50);
-            screenShakeTime = 15; glitchEffectTime = 10;
-            items.splice(i, 1);
+            // 如果不在無敵狀態內才扣血
+            if (invincibleTimer <= 0) {
+              lives--;
+              invincibleTimer = 45; // 給予約 0.75 秒的無敵時間
+              createBurstParticles(item.x, item.y, '#FF0000', 50);
+              screenShakeTime = 15; glitchEffectTime = 10;
+            }
+            items.splice(i, 1); // 受傷後隕石碎掉，避免連續判定
           }
           continue;
         }
@@ -372,8 +380,13 @@
       let hearts = "❤️".repeat(lives); textSize(22); text(`${hearts}`, 20, 50);
       
       textAlign(CENTER, TOP); textSize(24);
-      if (isFist) { fill(0, 255, 0); text("🔥 粉碎模式 ON 🔥", width/2, 20); }
-      else { fill(255, 100, 100); text("⚠️ 握拳擊碎隕石！", width/2, 20); }
+      if (isFist) { 
+        fill(0, 255, 0); text("🔥 粉碎模式 ON 🔥", width/2, 20); 
+      } else if (invincibleTimer > 0) {
+        fill(0, 255, 255); text("🛡️ 無敵狀態中 🛡️", width/2, 20);
+      } else { 
+        fill(255, 100, 100); text("⚠️ 握拳擊碎隕石！", width/2, 20); 
+      }
 
       if (lives <= 0) triggerGameOver();
     }
@@ -673,6 +686,7 @@
       items = []; particles = []; cursorTrailParticles = []; winParticles = [];
       screenShakeTime = 0; glitchEffectTime = 0;
       chargeLevel = 0; bossItem = null; challengeMode = false;
+      invincibleTimer = 0; 
     }
   </script>
 </body>
