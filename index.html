@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>魔法手勢：星空接接樂</title>
+  
+  <!-- 載入 p5.js 核心庫 -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.js"></script>
+  <!-- 載入 ml5.js (使用穩定支援 handpose 的版本) -->
+  <script src="https://unpkg.com/ml5@0.12.2/dist/ml5.min.js"></script>
+  
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      background-color: #1a1a2e; /* 深藍色星空背景 */
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      color: white;
+      overflow: hidden;
+    }
+    #game-container {
+      position: relative;
+      box-shadow: 0 0 20px rgba(0, 255, 204, 0.5);
+      border-radius: 10px;
+      overflow: hidden;
+      background-color: #000;
+    }
+    /* 隱藏 p5.js 預設可能產生的額外捲動軸 */
+    canvas {
+      display: block;
+    }
+    .loading-text {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 24px;
+      font-weight: bold;
+      color: #00ffcc;
+      text-shadow: 0 0 10px #00ffcc;
+      pointer-events: none;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="game-container">
+    <div id="loading" class="loading-text">📷 正在啟動攝影機與 AI 模型...</div>
+  </div>
+
+  <script>
+    // ==========================================
+    // 遊戲核心變數
+    // ==========================================
+    let video;
+    let handpose;
+    let predictions = [];
+    
+    // 遊戲狀態：0=載入中, 1=開始畫面, 2=遊戲中, 3=遊戲結束
+    let gameState = 0; 
+    let score = 0;
+    let lives = 3;
+    
+    // 手指游標位置 (加入平滑化變數)
+    let cursorX = 320;
+    let cursorY = 240;
+    let targetX = 320;
+    let targetY = 240;
+    
+    // 遊戲物件陣列與粒子特效陣列
+    let items = [];
+    let particles = [];
+    
+    // ==========================================
+    // p5.js 內建函式：初始化
+    // ==========================================
+    function setup() {
+      let canvas = createCanvas(640, 480);
+      canvas.parent('game-container');
+      
+      // 設定文字屬性
+      textAlign(CENTER, CENTER);
+      
+      // 1. 啟動攝影機
+      video = createCapture(VIDEO);
+      video.size(width, height);
+      video.hide(); // 隱藏原本的 HTML 影片元素，我們要在 canvas 裡自己畫
+      
+      // 2. 初始化 ml5.handpose 模型
+      handpose = ml5.handpose(video, modelReady);
+      
+      // 3. 當 AI 預測到手部時，將結果存入 predictions 陣列
+      handpose.on('predict', results => {
+        predictions = results;
+      });
+    }
+    
+    // AI 模型載入完成的回呼函式
+    function modelReady() {
+      console.log('Handpose 模型載入完成！');
+      document.getElementById('loading').style.display = 'none';
+      gameState = 1; // 進入開始畫面
+    }
+
+    // ==========================================
+    // p5.js 內建函式：每一幀不斷重複執行 (主迴圈)
+    // ==========================================
+    function draw() {
+      // --- 繪製背景 (攝影機畫面) ---
+      push();
+      // 將畫面水平翻轉，這樣玩家的動作才會像照鏡子一樣直覺
+      translate(width, 0);
+      scale(-1, 1);
+      image(video, 0, 0, width, height);
+      // 加上半透明黑色遮罩，讓遊戲物件更清晰
+      fill(0, 0, 0, 150);
+      rect(0, 0, width, height);
+      pop();
+
+      // --- 更新手部追蹤位置 (將 AI 結果連結到遊戲邏輯) ---
+      if (predictions.length > 0) {
+        // 取得第一隻手的節點 (landmark) 陣列
+        // indexFinger 的指尖是第 8 號節點
+        let indexTip = predictions[0].landmarks[8]; 
+        
+        // 注意：因為畫面翻轉了，X 座標也要跟著翻轉對應！
+        targetX = width - indexTip[0]; 
+        targetY = indexTip[1];
+      }
+      
+      // 使用 lerp (線性插值) 讓游標移動更平滑，減少 AI 判定抖動
+      cursorX = lerp(cursorX, targetX, 0.2);
+      cursorY = lerp(cursorY, targetY, 0.2);
+
+      // --- 狀態機切換 ---
+      if (gameState === 1) {
+        drawStartScreen();
+      } else if (gameState === 2) {
+        playGame();
+      } else if (gameState === 3) {
+        drawGameOverScreen();
+      }
+    }
+
+    // ==========================================
+    // 遊戲各階段畫面繪製邏輯
+    // ==========================================
+
+    // 1. 開始畫面
+    function drawStartScreen() {
+      fill(255);
+      textSize(36);
+      text("✨ 魔法手勢：星空接接樂 ✨", width / 2, height / 2 - 50);
+      
+      textSize(20);
+      fill(200, 255, 255);
+      text("舉起你的手，用「食指」控制魔法環", width / 2, height / 2 + 10);
+      text("⭐ 接住星星得 1 分 | 💣 碰到炸彈扣 1 命", width / 2, height / 2 + 40);
+      
+      // 繪製一個閃爍的提示
+      fill(0, 255, 204, map(sin(frameCount * 0.1), -1, 1, 100, 255));
+      textSize(24);
+      text("將食指移動到此處開始遊戲", width / 2, height / 2 + 120);
+      
+      // 畫出魔法手勢游標
+      drawCursor(cursorX, cursorY);
+      
+      // 檢查是否觸碰開始按鈕區塊
+      let d = dist(cursorX, cursorY, width / 2, height / 2 + 120);
+      if (d < 50) {
+        resetGame();
+        gameState = 2; // 進入遊戲
+      }
+    }
+
+    // 2. 遊戲進行中
+    function playGame() {
+      // 隨機產生掉落物 (每 40 幀產生一個)
+      if (frameCount % 40 === 0) {
+        let isBomb = random() < 0.3; // 30% 機率是炸彈
+        items.push({
+          x: random(50, width - 50),
+          y: -50,
+          type: isBomb ? 'bomb' : 'star',
+          speed: random(3, 6) + (score * 0.1), // 隨著分數增加掉落速度
+          size: 40
+        });
+      }
+
+      // 更新與繪製掉落物
+      for (let i = items.length - 1; i >= 0; i--) {
+        let item = items[i];
+        item.y += item.speed; // 往下掉
+        
+        // 畫出物品
+        textSize(item.size);
+        text(item.type === 'star' ? "⭐" : "💣", item.x, item.y);
+        
+        // --- 核心邏輯：碰撞偵測 (將手部座標與物品座標比較) ---
+        let d = dist(cursorX, cursorY, item.x, item.y);
+        if (d < 40) { // 碰撞距離閾值
+          if (item.type === 'star') {
+            score += 1;
+            createParticles(item.x, item.y, '#FFD700'); // 黃色粒子
+          } else {
+            lives -= 1;
+            createParticles(item.x, item.y, '#FF3333'); // 紅色粒子
+            // 螢幕震動特效 (簡單版：短暫背景閃紅)
+            background(255, 0, 0, 100);
+          }
+          items.splice(i, 1); // 刪除被碰到的物品
+          continue;
+        }
+        
+        // 物品掉出畫面下方則刪除
+        if (item.y > height + 50) {
+          items.splice(i, 1);
+        }
+      }
+
+      // 更新與繪製粒子特效
+      updateParticles();
+      
+      // 畫出玩家控制的魔法游標
+      drawCursor(cursorX, cursorY);
+      
+      // 繪製 UI (分數與生命值)
+      drawUI();
+      
+      // 檢查遊戲結束
+      if (lives <= 0) {
+        gameState = 3;
+      }
+    }
+
+    // 3. 遊戲結束畫面
+    function drawGameOverScreen() {
+      fill(255, 100, 100, 200);
+      rect(0, 0, width, height); // 鋪一層紅色半透明
+      
+      fill(255);
+      textSize(48);
+      text("GAME OVER", width / 2, height / 2 - 50);
+      textSize(24);
+      text(`最終分數：${score}`, width / 2, height / 2 + 10);
+      
+      fill(0, 255, 204, map(sin(frameCount * 0.1), -1, 1, 100, 255));
+      text("將食指移動到此處「重新開始」", width / 2, height / 2 + 100);
+      
+      drawCursor(cursorX, cursorY);
+      
+      // 重新開始判定
+      let d = dist(cursorX, cursorY, width / 2, height / 2 + 100);
+      if (d < 50) {
+        resetGame();
+        gameState = 2;
+      }
+    }
+
+    // ==========================================
+    // 輔助與特效函式
+    // ==========================================
+
+    // 重設遊戲數值
+    function resetGame() {
+      score = 0;
+      lives = 3;
+      items = [];
+      particles = [];
+    }
+
+    // 繪製玩家的魔法手勢游標
+    function drawCursor(x, y) {
+      push();
+      translate(x, y);
+      // 旋轉外圈光環
+      rotate(frameCount * 0.05);
+      noFill();
+      strokeWeight(4);
+      stroke(0, 255, 204, 150); // 螢光綠色
+      ellipse(0, 0, 50, 50);
+      stroke(255, 255, 255, 200);
+      ellipse(0, 0, 30, 30);
+      pop();
+      
+      // 準心點
+      noStroke();
+      fill(255);
+      circle(x, y, 10);
+    }
+
+    // 繪製上方狀態列 (UI)
+    function drawUI() {
+      textAlign(LEFT, TOP);
+      textSize(24);
+      
+      // 分數
+      fill(255, 215, 0); // 金色
+      text(`分數: ${score}`, 20, 20);
+      
+      // 生命值 (用愛心表示)
+      fill(255, 50, 50); // 紅色
+      let hearts = "";
+      for (let i = 0; i < lives; i++) hearts += "❤️";
+      text(`生命: ${hearts}`, 20, 55);
+      
+      // 準度狀態提示
+      textAlign(RIGHT, TOP);
+      textSize(16);
+      if (predictions.length > 0) {
+        fill(0, 255, 0);
+        text("✅ AI 追蹤中", width - 20, 20);
+      } else {
+        fill(255, 100, 100);
+        text("❌ 未偵測到手部", width - 20, 20);
+      }
+      textAlign(CENTER, CENTER); // 恢復預設
+    }
+
+    // 產生爆炸粒子
+    function createParticles(px, py, pcolor) {
+      for (let i = 0; i < 15; i++) {
+        particles.push({
+          x: px,
+          y: py,
+          vx: random(-5, 5),
+          vy: random(-5, 5),
+          life: 255,
+          color: pcolor
+        });
+      }
+    }
+
+    // 更新並繪製粒子
+    function updateParticles() {
+      for (let i = particles.length - 1; i >= 0; i--) {
+        let p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life -= 10; // 逐漸消失
+        
+        noStroke();
+        let c = color(p.color);
+        c.setAlpha(p.life);
+        fill(c);
+        circle(p.x, p.y, map(p.life, 0, 255, 2, 10)); // 越小越消失
+        
+        if (p.life <= 0) particles.splice(i, 1);
+      }
+    }
+  </script>
+</body>
+</html>
