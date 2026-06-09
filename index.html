@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>魔法手勢：星空大冒險 4.0 (手勢掌控版)</title>
+  <title>魔法手勢：星空大冒險 5.0 (雙模式精準版)</title>
   
   <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.js"></script>
   <script src="https://unpkg.com/ml5@0.12.2/dist/ml5.min.js"></script>
@@ -23,7 +23,7 @@
     }
     #game-container {
       position: relative;
-      box-shadow: 0 0 40px rgba(0, 255, 204, 0.4);
+      box-shadow: 0 0 50px rgba(0, 255, 204, 0.5);
       border-radius: 15px;
       overflow: hidden;
       background-color: #000;
@@ -63,10 +63,12 @@
     let handpose;
     let predictions = [];
     
+    // 狀態管理：0=讀取, 1=選單, 2=模式一(星空), 3=模式二(粉碎), 4=失敗, 5=通關
     let gameState = 0; 
     let score = 0;
     let lives = 3;
     let level = 1;
+    let gameTimer = 0; // 模式二用的生存計時器
     
     let combo = 0;
     let comboTimer = 0; 
@@ -76,9 +78,14 @@
     let shieldTimer = 0;
     const SHIELD_DURATION = 300; 
     
+    // 選單停留變數
+    let hoverMenu1 = 0;
+    let hoverMenu2 = 0;
+    
     // 特效變數
     let screenShakeTime = 0;
     let glitchEffectTime = 0;
+    let winParticles = []; // 通關彩帶特效
     
     // 手指游標位置
     let cursorX = 320;
@@ -87,11 +94,12 @@
     let targetY = 240;
     let cursorTrailParticles = []; 
 
-    // --- 4.0 新增：手勢相關變數 ---
-    let isHandOpen = false; // 是否偵測到張手手勢
-    let chargeLevel = 0;    // 集氣進度 (0~100)
-    let bossItem = null;    // 巨型隕石 Boss
-    let challengeMode = false; // 是否處於挑戰模式
+    // 手勢狀態
+    let isHandOpen = false; 
+    let isFist = false;     // 新增：是否握拳
+    let chargeLevel = 0;    
+    let bossItem = null;    
+    let challengeMode = false; 
     
     let items = [];
     let particles = [];
@@ -121,7 +129,6 @@
         predictions = results;
       });
 
-      // 初始化背景星星
       for(let i=0; i<50; i++) {
         backgroundStars.push({
           x: random(width), y: random(height),
@@ -131,7 +138,7 @@
     }
     
     function modelReady() {
-      console.log('Handpose 高精度模型就緒');
+      console.log('Handpose 模型就緒');
       document.getElementById('loading').style.display = 'none';
       gameState = 1;
     }
@@ -140,34 +147,37 @@
     // 主迴圈
     // ==========================================
     function draw() {
-      // 處理畫面震動特效
       let dx = 0, dy = 0;
       if (screenShakeTime > 0) {
-        dx = random(-10, 10), dy = random(-10, 10);
+        dx = random(-15, 15), dy = random(-15, 15);
         screenShakeTime--;
       }
       
       push();
       translate(dx, dy); 
 
-      // 鏡像處理
+      // 攝影機鏡像
       push();
       translate(width, 0);
       scale(-1, 1);
       image(video, 0, 0, width, height);
       pop();
       
-      // 背景遮罩與星空 (挑戰模式下背景變紅)
-      fill(challengeMode ? 30 : 5, 5, 20, 190); 
+      // 背景遮罩
+      let bgColor = (gameState === 3) ? color(20, 5, 20, 200) : color(5, 5, 20, 190);
+      if (challengeMode) bgColor = color(30, 5, 5, 190);
+      fill(bgColor); 
       rect(0, 0, width, height);
       drawBackgroundStars();
 
-      // 更新手部追蹤與手勢狀態
       updateHandTracking();
 
-      if (gameState === 1) drawStartScreen();
-      else if (gameState === 2) playGame();
-      else if (gameState === 3) drawGameOverScreen();
+      // 狀態機
+      if (gameState === 1) drawMenuScreen();
+      else if (gameState === 2) playGame1();
+      else if (gameState === 3) playGame2();
+      else if (gameState === 4) drawGameOverScreen();
+      else if (gameState === 5) drawWinScreen();
       
       if (glitchEffectTime > 0) {
         drawGlitchEffect();
@@ -181,7 +191,7 @@
       fill(255, 255, 255, 150);
       noStroke();
       for(let star of backgroundStars) {
-        star.y += star.speed + (level * 0.2) + (challengeMode ? 2 : 0); // 挑戰模式加速
+        star.y += star.speed + (level * 0.2) + (challengeMode ? 2 : 0) + (gameState===3 ? 3 : 0); 
         if(star.y > height) {
           star.y = 0;
           star.x = random(width);
@@ -191,59 +201,110 @@
     }
 
     // ==========================================
-    // 4.0 核心：手部追蹤與手勢判定
+    // 手部辨識核心 (升級版)
     // ==========================================
     function updateHandTracking() {
-       isHandOpen = false; // 預設為未張開
+       isHandOpen = false; 
+       isFist = false;
 
        if (predictions.length > 0) {
         let lm = predictions[0].landmarks; 
         
-        // --- 核心改動 1：計算手掌中心 ---
-        // 使用手腕(0)、食指根部(5)、小指根部(17)的平均點作為手掌中心
-        let centerX = (lm[0][0] + lm[5][0] + lm[17][0]) / 3;
-        let centerY = (lm[0][1] + lm[5][1] + lm[17][1]) / 3;
+        // 1. 更精準的中心：使用手掌的 Bounding Box 中心
+        let minX = width, maxX = 0, minY = height, maxY = 0;
+        for(let i=0; i<lm.length; i++) {
+            if(lm[i][0] < minX) minX = lm[i][0];
+            if(lm[i][0] > maxX) maxX = lm[i][0];
+            if(lm[i][1] < minY) minY = lm[i][1];
+            if(lm[i][1] > maxY) maxY = lm[i][1];
+        }
+        let centerX = (minX + maxX) / 2;
+        let centerY = (minY + maxY) / 2;
 
-        // 鏡像座標映射
         targetX = width - centerX; 
         targetY = centerY;
 
-        // --- 核心改動 2：手勢偵測 (張開手掌) ---
-        // 計算五根手指尖端 (4,8,12,16,20) 到手腕 (0) 的平均距離
-        let tips = [4, 8, 12, 16, 20];
+        // 2. 動態手勢判定 (解決遠近問題)
+        let handSize = dist(minX, minY, maxX, maxY); // 手掌在畫面上的大小
+        let tips = [8, 12, 16, 20]; // 食、中、無名、小指尖
         let totalDist = 0;
         for(let id of tips) {
             totalDist += dist(lm[0][0], lm[0][1], lm[id][0], lm[id][1]);
         }
-        let avgDist = totalDist / 5;
-        
-        // 設定一個閾值，超過這個距離認為手掌張開
-        // 這個值可能需要根據攝影機距離微調，120 是一個經驗值
-        if (avgDist > 120) {
-            isHandOpen = true;
-        }
+        let avgDist = totalDist / 4;
+        let gestureRatio = avgDist / handSize; // 計算相對比例
+
+        // 根據比例判定
+        if (gestureRatio > 0.65) isHandOpen = true;
+        if (gestureRatio < 0.35) isFist = true;
       }
       
-      // 平滑移動
-      cursorX = lerp(cursorX, targetX, 0.3);
-      cursorY = lerp(cursorY, targetY, 0.3);
+      // 平滑移動 (防抖)
+      cursorX = lerp(cursorX, targetX, 0.25);
+      cursorY = lerp(cursorY, targetY, 0.25);
       
-      // 產生拖尾粒子 (張手時粒子更多更金)
-      if (frameCount % 2 === 0) {
+      // 拖尾粒子
+      if (frameCount % 2 === 0 && (gameState === 1 || gameState === 2 || gameState === 3)) {
+        let pColor = isFist ? color(255, 50, 50) : (isHandOpen ? color(255, 215, 0) : color(0, 255, 204));
         cursorTrailParticles.push({
-          x: cursorX + random(-15, 15),
-          y: cursorY + random(-15, 15),
-          life: 255,
-          size: isHandOpen ? random(8, 18) : random(5, 12),
-          isGold: isHandOpen
+          x: cursorX + random(-15, 15), y: cursorY + random(-15, 15),
+          life: 255, size: isHandOpen || isFist ? random(8, 18) : random(5, 12),
+          c: pColor
         });
       }
     }
 
-    function playGame() {
+    // ==========================================
+    // 選單畫面 (gameState = 1)
+    // ==========================================
+    function drawMenuScreen() {
+      fill(255); textSize(40);
+      text("🚀 星空大冒險 5.0 🚀", width / 2, 80);
+      textSize(20); fill(200, 255, 255);
+      text("將手掌移動到選項上維持 2 秒以開始", width / 2, 130);
+
+      // 模式一按鈕
+      drawMenuOption(160, 280, "⭐ 星空大冒險", "收集星星\n張手打BOSS", '#00BFFF', hoverMenu1);
+      // 模式二按鈕
+      drawMenuOption(480, 280, "☄️ 隕石粉碎者", "生存30秒\n握拳擊碎隕石", '#FF4500', hoverMenu2);
+
+      // 判定游標懸停
+      if (dist(cursorX, cursorY, 160, 280) < 80) hoverMenu1 += 2; else hoverMenu1 = max(0, hoverMenu1 - 2);
+      if (dist(cursorX, cursorY, 480, 280) < 80) hoverMenu2 += 2; else hoverMenu2 = max(0, hoverMenu2 - 2);
+
+      if (hoverMenu1 > 100) { resetGame(); gameState = 2; }
+      if (hoverMenu2 > 100) { resetGame(); gameTimer = 30 * 60; gameState = 3; }
+
+      updateAndDrawTrail(); 
+      drawCursor(cursorX, cursorY);
+    }
+
+    function drawMenuOption(x, y, title, desc, col, hoverVal) {
+      push();
+      translate(x, y);
+      fill(0, 0, 0, 150);
+      stroke(col);
+      strokeWeight(hoverVal > 0 ? 4 : 2);
+      rectMode(CENTER);
+      rect(0, 0, 220, 150, 15);
+      
+      noStroke(); fill(255); textSize(24); text(title, 0, -30);
+      textSize(16); fill(200); text(desc, 0, 15);
+      
+      // 進度條
+      if (hoverVal > 0) {
+        fill(50); rect(0, 55, 180, 10, 5);
+        fill(col); rect(-90 + (hoverVal*0.9), 55, hoverVal * 1.8, 10, 5);
+      }
+      pop();
+    }
+
+    // ==========================================
+    // 遊戲模式一：星空大冒險
+    // ==========================================
+    function playGame1() {
       updateGameMechanics();
       
-      // 分流：挑戰模式 vs 一般模式
       if (challengeMode) {
           updateChallengeMode();
       } else {
@@ -256,122 +317,128 @@
       updateParticles();
       drawUI();
 
-      if (lives <= 0) {
-        gameState = 3;
-        createBurstParticles(width/2, height/2, '#FF0000', 100); 
-      }
+      if (lives <= 0) triggerGameOver();
     }
-    
+
+    // ==========================================
+    // 遊戲模式二：隕石粉碎者 (握拳防禦生存)
+    // ==========================================
+    function playGame2() {
+      if (gameTimer > 0) gameTimer--;
+      if (gameTimer <= 0) triggerWin(); // 撐過30秒通關
+
+      // 生成大量隕石
+      if (frameCount % 20 === 0) {
+        items.push({
+          x: random(50, width - 50), y: -50, type: 'meteor',
+          speed: random(5, 10), size: random(50, 80), color: '#A0522D',
+          rotation: random(TWO_PI), rotSpeed: random(-0.1, 0.1)
+        });
+      }
+
+      for (let i = items.length - 1; i >= 0; i--) {
+        let item = items[i];
+        item.y += item.speed; item.rotation += item.rotSpeed;
+        push(); translate(item.x, item.y); rotate(item.rotation);
+        textSize(item.size); text("🪨", 0, 0); pop();
+        
+        // 碰撞判定
+        if (dist(cursorX, cursorY, item.x, item.y) < item.size/2 + 20) {
+          if (isFist) {
+            // 握拳粉碎！
+            createBurstParticles(item.x, item.y, '#FFD700', 30);
+            score += 10;
+            items.splice(i, 1);
+            screenShakeTime = 2;
+          } else {
+            // 沒握拳受傷
+            lives--;
+            createBurstParticles(item.x, item.y, '#FF0000', 50);
+            screenShakeTime = 15; glitchEffectTime = 10;
+            items.splice(i, 1);
+          }
+          continue;
+        }
+        if (item.y > height + 50) items.splice(i, 1);
+      }
+
+      updateAndDrawTrail(); 
+      drawCursor(cursorX, cursorY);
+      updateParticles();
+
+      // UI
+      textAlign(LEFT, TOP); fill(0, 0, 0, 150); rect(10, 10, 160, 80, 10);
+      fill(255, 100, 100); textSize(24); text(`TIME: ${ceil(gameTimer/60)}`, 20, 15);
+      let hearts = "❤️".repeat(lives); textSize(22); text(`${hearts}`, 20, 50);
+      
+      textAlign(CENTER, TOP); textSize(24);
+      if (isFist) { fill(0, 255, 0); text("🔥 粉碎模式 ON 🔥", width/2, 20); }
+      else { fill(255, 100, 100); text("⚠️ 握拳擊碎隕石！", width/2, 20); }
+
+      if (lives <= 0) triggerGameOver();
+    }
+
+    // ==========================================
+    // 遊戲機制與 Boss 邏輯 (延續模式一)
+    // ==========================================
     function updateGameMechanics() {
-        // 關卡升級
         let newLevel = floor(score / 50) + 1;
         if (newLevel > level) {
             level = newLevel;
             createBurstParticles(width/2, height/2, '#00FFFF', 50); 
         }
 
-        // --- 4.0 新機制：觸發挑戰模式 ---
-        // 每當分數達到 50 的倍數，且當前沒有 Boss 時，觸發挑戰
         if (score > 0 && score % 50 === 0 && !bossItem && !challengeMode) {
-            startChallenge();
+            challengeMode = true; chargeLevel = 0; items = [];
+            bossItem = { x: width / 2, y: -100, size: 150, hp: 100, speed: 0.5 + (level * 0.1) };
+            screenShakeTime = 20;
         }
 
-        if (comboTimer > 0) comboTimer--;
-        else if (combo > 0) combo = 0; 
-
+        if (comboTimer > 0) comboTimer--; else if (combo > 0) combo = 0; 
         if (shieldActive) {
             shieldTimer--;
             if (shieldTimer <= 0) shieldActive = false;
         }
     }
 
-    // --- 4.0 新增：挑戰模式邏輯 ---
-    function startChallenge() {
-        challengeMode = true;
-        chargeLevel = 0;
-        items = []; // 清空場上雜物
-        // 生成巨型隕石 Boss
-        bossItem = {
-            x: width / 2,
-            y: -100,
-            size: 150,
-            hp: 100,
-            speed: 0.5 + (level * 0.1)
-        };
-        screenShakeTime = 20; // Boss 進場震動
-    }
-
     function updateChallengeMode() {
         if (!bossItem) return;
-
-        // Boss 移動
         bossItem.y += bossItem.speed;
         
-        // 繪製 Boss (燃燒的隕石)
-        push();
-        translate(bossItem.x, bossItem.y);
-        rotate(frameCount * 0.02);
-        textAlign(CENTER, CENTER);
-        textSize(bossItem.size);
-        text("☄️", 0, 0);
-        // Boss 血條
-        noStroke();
-        fill(255, 0, 0, 150);
-        rect(-50, 80, 100, 10);
-        fill(0, 255, 0);
-        rect(-50, 80, bossItem.hp, 10);
-        pop();
+        push(); translate(bossItem.x, bossItem.y); rotate(frameCount * 0.02);
+        textSize(bossItem.size); text("☄️", 0, 0);
+        noStroke(); fill(255, 0, 0, 150); rect(-50, 80, 100, 10);
+        fill(0, 255, 0); rect(-50, 80, bossItem.hp, 10); pop();
 
-        // 核心機制：檢查玩家是否張手集氣
         if (isHandOpen) {
-            chargeLevel = min(chargeLevel + 2, 100); // 集氣增加
-            // 集氣特效
+            chargeLevel = min(chargeLevel + 2, 100); 
             createBurstParticles(cursorX, cursorY, '#FFD700', 2);
-            if (frameCount % 5 === 0) screenShakeTime = 2; // 集氣時輕微震動
+            if (frameCount % 5 === 0) screenShakeTime = 2; 
         } else {
-            chargeLevel = max(chargeLevel - 1, 0); // 未張手則能量衰減
+            chargeLevel = max(chargeLevel - 1, 0); 
         }
 
-        // 繪製集氣條 (在游標下方)
         if (chargeLevel > 0) {
-            push();
-            translate(cursorX, cursorY + 80);
-            noStroke();
-            fill(50, 50, 50, 150);
-            rect(-60, 0, 120, 20, 10);
-            // 能量條顏色變化
-            let barColor = chargeLevel === 100 ? color(0, 255, 255) : color(255, 215, 0);
-            fill(barColor);
+            push(); translate(cursorX, cursorY + 80);
+            noStroke(); fill(50, 50, 50, 150); rect(-60, 0, 120, 20, 10);
+            fill(chargeLevel === 100 ? color(0, 255, 255) : color(255, 215, 0));
             rect(-60, 0, map(chargeLevel, 0, 100, 0, 120), 20, 10);
-            fill(255);
-            textSize(14);
-            text(chargeLevel === 100 ? "能量釋放!" : "張開手掌集氣!", 0, 0);
-            pop();
+            fill(255); textSize(14);
+            text(chargeLevel === 100 ? "能量釋放!" : "張開手掌集氣!", 0, 0); pop();
         }
 
-        // 集氣完成，發射能量波攻擊 Boss
         if (chargeLevel === 100) {
-            createBurstParticles(cursorX, cursorY, '#00FFFF', 50); // 發射特效
-            chargeLevel = 0; // 重置能量
-            bossItem.hp -= 34; // 扣 Boss 血量 (需要 3 次集氣)
-            screenShakeTime = 15;
-            
+            createBurstParticles(cursorX, cursorY, '#00FFFF', 50); 
+            chargeLevel = 0; bossItem.hp -= 34; screenShakeTime = 15;
             if (bossItem.hp <= 0) {
-                // Boss 被擊敗
                 createBurstParticles(bossItem.x, bossItem.y, '#FF4500', 150);
-                score += 50; // 大量加分
-                bossItem = null;
-                challengeMode = false; // 回到一般模式
+                triggerWin(); // 打敗王直接通關
             }
         }
 
-        // Boss 撞到底部，挑戰失敗
         if (bossItem.y > height + bossItem.size/2) {
-            lives--;
-            bossItem = null;
-            challengeMode = false;
-            screenShakeTime = 30;
-            glitchEffectTime = 20;
+            lives--; bossItem = null; challengeMode = false;
+            screenShakeTime = 30; glitchEffectTime = 20;
             createBurstParticles(width/2, height, '#FF0000', 100);
         }
     }
@@ -435,74 +502,60 @@
       for (let i = cursorTrailParticles.length - 1; i >= 0; i--) {
         let p = cursorTrailParticles[i];
         p.life -= 15; p.size *= 0.9;
-        // 拖尾顏色根據是否張手而變化
-        let c = p.isGold ? color(255, 215, 0) : (shieldActive ? color(0, 200, 255) : color(0, 255, 204));
+        let c = color(p.c);
         c.setAlpha(p.life); fill(c);
         circle(p.x, p.y, p.size);
         if (p.life <= 0) cursorTrailParticles.splice(i, 1);
       }
     }
 
-    // --- 4.0 改進：更華麗的手掌游標 ---
     function drawCursor(x, y) {
       push();
       translate(x, y);
       
-      // 基礎顏色
       let baseColor = shieldActive ? color(0, 200, 255) : color(0, 255, 204);
-      // 如果張手，疊加金色光輝
       if (isHandOpen) baseColor = color(255, 215, 0);
+      if (isFist) baseColor = color(255, 50, 50);
 
-      // 外圈能量場 (張手時變大變亮)
-      let outerSize = isHandOpen ? 120 : (shieldActive ? 90 : 70);
+      let outerSize = isHandOpen ? 120 : (isFist ? 50 : (shieldActive ? 90 : 70));
       
       rotate(frameCount * 0.1);
       noFill();
-      strokeWeight(isHandOpen ? 5 : 3);
+      strokeWeight(isHandOpen || isFist ? 5 : 3);
       stroke(baseColor);
-      // 張手時外圈是實線，平時是虛線
-      if (!isHandOpen) drawingContext.setLineDash([10, 15]); 
+      if (!isHandOpen && !isFist) drawingContext.setLineDash([10, 15]); 
       ellipse(0, 0, outerSize, outerSize);
       drawingContext.setLineDash([]); 
 
-      // 第二層旋轉環
       rotate(-frameCount * 0.2);
       strokeWeight(2);
       stroke(baseColor.levels[0], baseColor.levels[1], baseColor.levels[2], 150);
       let innerSize = outerSize * 0.6;
       rectMode(CENTER);
-      rect(0, 0, innerSize, innerSize);
-      
-      // 中心核心
-      noStroke();
-      fill(255);
-      circle(0, 0, 12);
-      // 張手時中心發光
-      if (isHandOpen) {
-        fill(255, 215, 0, 100);
-        circle(0, 0, 30);
+      if (isFist) {
+          fill(255, 50, 50, 150); 
+          circle(0, 0, innerSize); // 握拳顯示實心圓
+      } else {
+          rect(0, 0, innerSize, innerSize);
       }
+      
+      noStroke(); fill(255); circle(0, 0, 12);
+      if (isHandOpen) { fill(255, 215, 0, 100); circle(0, 0, 30); }
+      if (isFist) { fill(255, 50, 50, 200); circle(0, 0, 20); }
       
       pop();
     }
 
     function drawUI() {
-      textAlign(LEFT, TOP);
-      fill(0, 0, 0, 150);
-      rect(10, 10, 160, 80, 10); // 加大 UI 背景
-      
+      textAlign(LEFT, TOP); fill(0, 0, 0, 150); rect(10, 10, 160, 80, 10); 
       fill(255, 215, 0); textSize(24); text(`SCORE: ${score}`, 20, 15);
       textSize(18); fill(0, 255, 255); text(`LEVEL ${level}`, 20, 45);
       let hearts = "❤️".repeat(lives); textSize(22); text(`${hearts}`, 20, 90);
       
-      // 挑戰模式提示
       if (challengeMode) {
-          textAlign(CENTER, TOP);
-          textSize(28);
-          fill(255, 50, 50);
+          textAlign(CENTER, TOP); textSize(28); fill(255, 50, 50);
           text("⚠️ 隕石來襲！張手集氣！ ⚠️", width/2, 20);
       }
-      // 連擊顯示 (非挑戰模式才顯示)
       else if (combo > 1) {
           textAlign(CENTER, TOP); textSize(40);
           let comboColor = combo > 5 ? color(255, 50, 50) : color(255, 150, 0);
@@ -540,59 +593,85 @@
     }
 
     function drawGlitchEffect() {
-      fill(255, 0, 0, 50); rect(0, 0, width, height);
-      for (let i = 0; i < 5; i++) {
-        fill(255, 255, 255, random(50, 150)); noStroke();
-        rect(0, random(height), width, random(5, 20));
+      fill(255, 0, 0, 80); rect(0, 0, width, height);
+      for (let i = 0; i < 8; i++) {
+        fill(255, 255, 255, random(50, 200)); noStroke();
+        rect(0, random(height), width, random(5, 30));
+        rect(random(width), 0, random(5, 30), height); // 橫豎交織故障
       }
     }
 
     // ==========================================
-    // 遊戲流程畫面
+    // 成功/失敗流程與特效
     // ==========================================
-    function drawStartScreen() {
-      fill(255); textSize(42);
-      text("🚀 星空大冒險 4.0 🚀", width / 2, height / 2 - 100);
-      textSize(24); fill(255, 215, 0);
-      text("【手勢掌控版】", width / 2, height / 2 - 60);
-      
-      textSize(18); fill(200, 255, 255);
-      text("移動手掌控制光環接星星", width / 2, height / 2 - 20);
-      text("遇到巨大隕石時，請「張開手掌」集氣攻擊！", width / 2, height / 2 + 10);
-      fill(255, 100, 100);
-      text("💖補血 | 🛡️護盾無敵", width / 2, height / 2 + 40);
-      
-      fill(0, 255, 204, map(sin(frameCount * 0.1), -1, 1, 100, 255));
-      textSize(24);
-      text("⚡ 將手掌移到此處開始 ⚡", width / 2, height / 2 + 130);
-      
-      updateAndDrawTrail(); drawCursor(cursorX, cursorY);
-      
-      if (dist(cursorX, cursorY, width / 2, height / 2 + 130) < 50) {
-        resetGame(); gameState = 2;
-      }
+    function triggerGameOver() {
+        gameState = 4;
+        screenShakeTime = 50; 
+        glitchEffectTime = 20;
+        createBurstParticles(width/2, height/2, '#FF0000', 100); 
+    }
+
+    function triggerWin() {
+        gameState = 5;
+        score += 500;
+        // 生成慶典紙吹雪
+        winParticles = [];
+        for(let i=0; i<150; i++) {
+            winParticles.push({
+                x: width/2, y: height,
+                vx: random(-8, 8), vy: random(-15, -5),
+                color: random(['#FFD700', '#00FFFF', '#FF69B4', '#32CD32']),
+                size: random(5, 12), angle: random(TWO_PI), rotSpeed: random(-0.2, 0.2)
+            });
+        }
     }
 
     function drawGameOverScreen() {
       fill(20, 0, 0, 220); rect(0, 0, width, height);
-      fill(255, 50, 50); textSize(56); text("SYSTEM FAILURE", width / 2, height / 2 - 60);
-      fill(255, 215, 0); textSize(32); text(`SCORE: ${score}`, width / 2, height / 2);
-      textSize(20); fill(0, 255, 255); text(`REACHED LEVEL: ${level}`, width / 2, height / 2 + 40);
-      fill(0, 255, 204, map(sin(frameCount * 0.1), -1, 1, 150, 255));
-      text("▶ 將手掌移到此處重試 ◀", width / 2, height / 2 + 120);
+      fill(255, 50, 50); textSize(60); 
+      text("💀 MISSION FAILED 💀", width / 2, height / 2 - 60);
+      fill(255, 215, 0); textSize(32); text(`FINAL SCORE: ${score}`, width / 2, height / 2 + 10);
+      
+      fill(0, 255, 204, map(sin(frameCount * 0.1), -1, 1, 150, 255)); textSize(20);
+      text("▶ 將手掌移到此處返回選單 ◀", width / 2, height / 2 + 120);
       updateAndDrawTrail(); drawCursor(cursorX, cursorY);
       if (dist(cursorX, cursorY, width / 2, height / 2 + 120) < 50) {
-        resetGame(); gameState = 2;
+        resetGame(); gameState = 1;
+      }
+    }
+
+    function drawWinScreen() {
+      fill(0, 20, 0, 180); rect(0, 0, width, height);
+      
+      // 更新並繪製紙吹雪
+      for(let p of winParticles) {
+          p.x += p.vx; p.y += p.vy;
+          p.vy += 0.2; // 重力
+          p.angle += p.rotSpeed;
+          push(); translate(p.x, p.y); rotate(p.angle);
+          fill(p.color); noStroke(); rect(0, 0, p.size, p.size); pop();
+      }
+
+      fill(255, 215, 0); textSize(60); 
+      text("🏆 STAGE CLEARED 🏆", width / 2, height / 2 - 60);
+      fill(0, 255, 255); textSize(32); text(`FINAL SCORE: ${score}`, width / 2, height / 2 + 10);
+      
+      fill(0, 255, 204, map(sin(frameCount * 0.1), -1, 1, 150, 255)); textSize(20);
+      text("▶ 將手掌移到此處返回選單 ◀", width / 2, height / 2 + 120);
+      
+      updateAndDrawTrail(); drawCursor(cursorX, cursorY);
+      if (dist(cursorX, cursorY, width / 2, height / 2 + 120) < 50) {
+        resetGame(); gameState = 1;
       }
     }
 
     function resetGame() {
-      score = 0; lives = 3; level = 1;
+      score = 0; lives = 3; level = 1; gameTimer = 0;
       combo = 0; comboTimer = 0;
       shieldActive = false; shieldTimer = 0;
-      items = []; particles = []; cursorTrailParticles = [];
+      hoverMenu1 = 0; hoverMenu2 = 0;
+      items = []; particles = []; cursorTrailParticles = []; winParticles = [];
       screenShakeTime = 0; glitchEffectTime = 0;
-      // 重置 4.0 變數
       chargeLevel = 0; bossItem = null; challengeMode = false;
     }
   </script>
