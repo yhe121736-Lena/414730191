@@ -3,11 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>魔法手勢：星空大冒險 2.0</title>
+  <title>魔法手勢：星空大冒險 3.0 (特效強化版)</title>
   
-  <!-- 載入 p5.js 核心庫 -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.js"></script>
-  <!-- 載入 ml5.js (使用穩定支援 handpose 的版本) -->
   <script src="https://unpkg.com/ml5@0.12.2/dist/ml5.min.js"></script>
   
   <style>
@@ -18,21 +16,19 @@
       justify-content: center;
       align-items: center;
       height: 100vh;
-      background-color: #0a0a1a; /* 更深邃的宇宙背景 */
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background-color: #050510;
+      font-family: 'Segoe UI', Tahoma, sans-serif;
       color: white;
       overflow: hidden;
     }
     #game-container {
       position: relative;
-      box-shadow: 0 0 30px rgba(100, 200, 255, 0.3);
-      border-radius: 12px;
+      box-shadow: 0 0 40px rgba(0, 255, 204, 0.4);
+      border-radius: 15px;
       overflow: hidden;
       background-color: #000;
     }
-    canvas {
-      display: block;
-    }
+    canvas { display: block; }
     .loading-text {
       position: absolute;
       top: 50%;
@@ -41,16 +37,22 @@
       font-size: 24px;
       font-weight: bold;
       color: #00ffcc;
-      text-shadow: 0 0 10px #00ffcc;
+      text-shadow: 0 0 15px #00ffcc;
       pointer-events: none;
       z-index: 10;
+      animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse {
+      0% { opacity: 0.6; }
+      50% { opacity: 1; }
+      100% { opacity: 0.6; }
     }
   </style>
 </head>
 <body>
 
   <div id="game-container">
-    <div id="loading" class="loading-text">📷 系統啟動中...</div>
+    <div id="loading" class="loading-text">📷 啟動高精度模型中...</div>
   </div>
 
   <script>
@@ -61,37 +63,36 @@
     let handpose;
     let predictions = [];
     
-    // 遊戲狀態：0=載入中, 1=開始畫面, 2=遊戲中, 3=遊戲結束
     let gameState = 0; 
     let score = 0;
     let lives = 3;
     let level = 1;
     
-    // --- 2.0 新增機制變數 ---
     let combo = 0;
-    let comboTimer = 0; // 連擊計時器
-    const COMBO_TIME_LIMIT = 60; // 連擊有效時間 (幀數)
+    let comboTimer = 0; 
+    const COMBO_TIME_LIMIT = 90; // 放寬一點連擊時間
 
     let shieldActive = false;
     let shieldTimer = 0;
-    const SHIELD_DURATION = 300; // 護盾持續 5 秒 (60fps * 5)
+    const SHIELD_DURATION = 300; 
     
-    let levelUpMessageTimer = 0; // 升級訊息顯示計時
+    // 特效變數
+    let screenShakeTime = 0;
+    let glitchEffectTime = 0;
     
     // 手指游標位置
     let cursorX = 320;
     let cursorY = 240;
     let targetX = 320;
     let targetY = 240;
-    // 游標拖尾陣列
-    let trail = [];
+    let cursorTrailParticles = []; // 彗星拖尾粒子
     
-    // 遊戲物件與粒子
     let items = [];
     let particles = [];
+    let backgroundStars = [];
     
     // ==========================================
-    // p5.js 初始化
+    // 初始化
     // ==========================================
     function setup() {
       let canvas = createCanvas(640, 480);
@@ -102,149 +103,195 @@
       video.size(width, height);
       video.hide();
       
-      // 設定手部偵測模型參數，提高偵測信心門檻以減少抖動
+      // 優化：提高信心門檻，減少誤判
       const options = {
-        flipHorizontal: true, // 模型直接翻轉，後續座標不用手動 width - x
-        detectionConfidence: 0.8,
+        flipHorizontal: false, // 我們在 p5.js 裡統一處理翻轉，這裡設為 false
+        detectionConfidence: 0.85, // 提高信心指數，更精準
         iouThreshold: 0.5,
-        scoreThreshold: 0.5
+        scoreThreshold: 0.85
       };
       handpose = ml5.handpose(video, options, modelReady);
       
       handpose.on('predict', results => {
         predictions = results;
       });
+
+      // 初始化背景星星
+      for(let i=0; i<50; i++) {
+        backgroundStars.push({
+          x: random(width), y: random(height),
+          size: random(1, 3), speed: random(0.2, 1)
+        });
+      }
     }
     
     function modelReady() {
-      console.log('Handpose 模型就緒');
+      console.log('Handpose 高精度模型就緒');
       document.getElementById('loading').style.display = 'none';
       gameState = 1;
     }
 
     // ==========================================
-    // 主迴圈 (每一幀執行)
+    // 主迴圈
     // ==========================================
     function draw() {
-      // 繪製背景 (半透明遮罩的攝影機畫面)
+      // 處理畫面震動特效
+      let dx = 0, dy = 0;
+      if (screenShakeTime > 0) {
+        dx = random(-10, 10);
+        dy = random(-10, 10);
+        screenShakeTime--;
+      }
+      
       push();
-      // 因為模型設定了 flipHorizontal: true，這裡不需要再 scale(-1, 1)
+      translate(dx, dy); // 套用震動
+
+      // --- 核心優化：正確的鏡像處理 ---
+      // 先把座標系移到畫布右側，然後水平反轉 (-1)。
+      // 這樣畫出來的 video 才是鏡像的。
+      push();
+      translate(width, 0);
+      scale(-1, 1);
       image(video, 0, 0, width, height);
-      fill(10, 10, 30, 180); // 深藍色遮罩增強宇宙感
-      rect(0, 0, width, height);
       pop();
+      
+      // 繪製背景遮罩與星空
+      fill(5, 5, 20, 190); 
+      rect(0, 0, width, height);
+      drawBackgroundStars();
 
       // 更新手部追蹤與游標
       updateCursorPosition();
 
-      // 狀態機
-      if (gameState === 1) {
-        drawStartScreen();
-      } else if (gameState === 2) {
-        playGame();
-      } else if (gameState === 3) {
-        drawGameOverScreen();
+      if (gameState === 1) drawStartScreen();
+      else if (gameState === 2) playGame();
+      else if (gameState === 3) drawGameOverScreen();
+      
+      // 受擊 Glitch 特效 (覆蓋在最上層)
+      if (glitchEffectTime > 0) {
+        drawGlitchEffect();
+        glitchEffectTime--;
+      }
+
+      pop(); // 結束震動 translate
+    }
+
+    // 繪製流動的星空背景
+    function drawBackgroundStars() {
+      fill(255, 255, 255, 150);
+      noStroke();
+      for(let star of backgroundStars) {
+        star.y += star.speed + (level * 0.2); // 關卡越高星星流動越快
+        if(star.y > height) {
+          star.y = 0;
+          star.x = random(width);
+        }
+        circle(star.x, star.y, star.size);
       }
     }
 
     // ==========================================
-    // 遊戲邏輯更新區
+    // 遊戲邏輯與精準定位
     // ==========================================
-    
     function updateCursorPosition() {
        if (predictions.length > 0) {
-        // 取得食指指尖 (Index Finger Tip, ID: 8)
         let indexTip = predictions[0].landmarks[8]; 
-        // 模型已翻轉，直接使用座標
-        targetX = indexTip[0]; 
+        
+        // --- 核心優化：解決左右顛倒 ---
+        // 因為 video 是從左上方開始畫，但我們做了鏡像視覺。
+        // AI 抓到的座標是「原始影像」的座標，所以我們要用 width 去減，才能對應到螢幕上。
+        targetX = width - indexTip[0]; 
         targetY = indexTip[1];
       }
-      // 平滑移動
-      cursorX = lerp(cursorX, targetX, 0.25);
-      cursorY = lerp(cursorY, targetY, 0.25);
       
-      // 更新拖尾
-      trail.push({x: cursorX, y: cursorY});
-      if (trail.length > 15) trail.shift();
+      // 優化：提高 lerp 數值 (從 0.25 -> 0.4)，讓游標跟隨更迅速
+      cursorX = lerp(cursorX, targetX, 0.4);
+      cursorY = lerp(cursorY, targetY, 0.4);
+      
+      // 產生彗星拖尾粒子
+      if (frameCount % 2 === 0) {
+        cursorTrailParticles.push({
+          x: cursorX + random(-10, 10),
+          y: cursorY + random(-10, 10),
+          life: 255,
+          size: random(5, 12)
+        });
+      }
     }
 
     function playGame() {
       updateGameMechanics();
       spawnItems();
       updateAndDrawItems();
-      drawUI();
+      
+      updateAndDrawTrail(); // 繪製拖尾
       drawCursor(cursorX, cursorY);
+      
       updateParticles();
+      drawUI();
 
       if (lives <= 0) {
         gameState = 3;
-        createParticles(width/2, height/2, '#FF0000', 50); // 遊戲結束大爆炸
+        createBurstParticles(width/2, height/2, '#FF0000', 100); 
       }
     }
     
-    // 更新各種計時器與機制狀態
     function updateGameMechanics() {
-        // 關卡升級機制：每 30 分升一級
-        let newLevel = floor(score / 30) + 1;
+        let newLevel = floor(score / 40) + 1; // 改為 40 分一級
         if (newLevel > level) {
             level = newLevel;
-            levelUpMessageTimer = 120; // 顯示 2 秒升級訊息
-            createParticles(width/2, height/2, '#00FFFF', 30); // 升級特效
-        }
-        if (levelUpMessageTimer > 0) levelUpMessageTimer--;
-
-        // 連擊計時器遞減
-        if (comboTimer > 0) {
-            comboTimer--;
-        } else if (combo > 0) {
-            combo = 0; // 時間到，連擊中斷
+            createBurstParticles(width/2, height/2, '#00FFFF', 50); // 升級大爆發
         }
 
-        // 護盾計時器遞減
+        if (comboTimer > 0) comboTimer--;
+        else if (combo > 0) combo = 0; 
+
         if (shieldActive) {
             shieldTimer--;
             if (shieldTimer <= 0) shieldActive = false;
         }
     }
 
-    // 產生掉落物 (根據關卡調整難度與種類)
     function spawnItems() {
-      // 關卡越高，產生頻率越高 (最低每 20 幀產生一個)
-      let spawnRate = max(20, 50 - (level - 1) * 5);
+      let spawnRate = max(15, 45 - (level - 1) * 4);
       
       if (frameCount % spawnRate === 0) {
         let r = random(1);
         let type, color, size, speedBase;
 
-        // 決定掉落物種類與機率
-        if (r < 0.05) { 
-            type = 'heart'; color = '#FF69B4'; size = 45; speedBase = 4; // 5% 愛心
-        } else if (r < 0.1) {
-            type = 'shield'; color = '#00BFFF'; size = 45; speedBase = 4; // 5% 護盾
-        } else if (r < 0.4 + (level * 0.05)) { // 隨關卡增加炸彈機率
-            type = 'bomb'; color = '#FF3333'; size = 40; speedBase = 5 + level;
+        if (r < 0.04) { 
+            type = 'heart'; color = '#FF69B4'; size = 45; speedBase = 4;
+        } else if (r < 0.08) {
+            type = 'shield'; color = '#00BFFF'; size = 45; speedBase = 4;
+        } else if (r < 0.35 + (level * 0.05)) { 
+            type = 'bomb'; color = '#FF3333'; size = 45; speedBase = 5 + level * 0.8;
         } else {
-            type = 'star'; color = '#FFD700'; size = 35; speedBase = 3 + level * 0.5;
+            type = 'star'; color = '#FFD700'; size = 40; speedBase = 3 + level * 0.6;
         }
 
         items.push({
           x: random(50, width - 50),
           y: -50,
           type: type,
-          speed: random(speedBase, speedBase + 2),
+          speed: random(speedBase, speedBase + 3), // 增加速度亂數，更有挑戰性
           size: size,
-          color: color
+          color: color,
+          rotation: random(TWO_PI),
+          rotSpeed: random(-0.1, 0.1)
         });
       }
     }
 
-    // 更新並繪製所有掉落物
     function updateAndDrawItems() {
       for (let i = items.length - 1; i >= 0; i--) {
         let item = items[i];
         item.y += item.speed;
+        item.rotation += item.rotSpeed;
         
-        // 繪製 (使用 emoji)
+        push();
+        translate(item.x, item.y);
+        rotate(item.rotation);
+        
         let displayChar = '';
         if (item.type === 'star') displayChar = '⭐';
         else if (item.type === 'bomb') displayChar = '💣';
@@ -252,166 +299,225 @@
         else if (item.type === 'shield') displayChar = '🛡️';
         
         textSize(item.size);
-        text(displayChar, item.x, item.y);
+        text(displayChar, 0, 0); // 畫在原點 (因為已經 translate)
+        pop();
         
-        // --- 碰撞偵測核心邏輯 ---
+        // --- 碰撞偵測 ---
+        let hitDist = shieldActive && item.type === 'bomb' ? 60 : 40; // 護盾狀態碰撞體積變大
         let d = dist(cursorX, cursorY, item.x, item.y);
-        if (d < item.size) {
+        
+        if (d < hitDist) {
           handleCollision(item);
-          items.splice(i, 1); // 移除物品
+          items.splice(i, 1); 
           continue;
         }
         
-        // 掉出畫面
         if (item.y > height + 50) {
           items.splice(i, 1);
-          if (item.type === 'star') {
-              combo = 0; // 漏接星星，連擊中斷
-          }
+          if (item.type === 'star') combo = 0; 
         }
       }
     }
 
-    // 處理碰撞事件
     function handleCollision(item) {
         if (item.type === 'star') {
             combo++;
             comboTimer = COMBO_TIME_LIMIT;
-            // 分數計算：基礎分 * (1 + 連擊加成)
-            let pointsAdded = 1 * (combo > 5 ? 2 : 1); 
-            score += pointsAdded;
-            createParticles(item.x, item.y, item.color);
+            
+            // Combo 爆發特效
+            if (combo % 5 === 0) {
+              createBurstParticles(item.x, item.y, '#FFD700', 40);
+              score += 5; // 額外獎勵
+            } else {
+              createBurstParticles(item.x, item.y, item.color, 15);
+            }
+            score += 1 * (combo > 5 ? 2 : 1); 
+            
         } 
         else if (item.type === 'bomb') {
             if (shieldActive) {
-                // 有護盾，彈開特效
-                createParticles(item.x, item.y, '#00BFFF', 20);
-                background(0, 200, 255, 50); // 藍色閃光
+                createBurstParticles(item.x, item.y, '#00BFFF', 30);
+                score += 2; // 護盾彈開炸彈加分
             } else {
-                // 沒護盾，扣血
                 lives--;
-                combo = 0; // 連擊中斷
-                createParticles(item.x, item.y, item.color, 30);
-                background(255, 0, 0, 100); // 紅色震動閃光
+                combo = 0; 
+                createBurstParticles(item.x, item.y, '#FF0000', 50);
+                screenShakeTime = 15;   // 觸發震動
+                glitchEffectTime = 10;  // 觸發視覺干擾
             }
         } 
         else if (item.type === 'heart') {
-            lives = min(lives + 1, 5); // 生命上限為 5
-            createParticles(item.x, item.y, item.color, 25);
+            lives = min(lives + 1, 5); 
+            createBurstParticles(item.x, item.y, item.color, 30);
         }
         else if (item.type === 'shield') {
             shieldActive = true;
             shieldTimer = SHIELD_DURATION;
-            createParticles(item.x, item.y, item.color, 25);
+            createBurstParticles(item.x, item.y, item.color, 30);
         }
     }
 
     // ==========================================
-    // 畫面繪製區 (UI, 游標, 粒子)
+    // 特效與 UI 繪製
     // ==========================================
 
+    // 繪製彗星拖尾
+    function updateAndDrawTrail() {
+      noStroke();
+      for (let i = cursorTrailParticles.length - 1; i >= 0; i--) {
+        let p = cursorTrailParticles[i];
+        p.life -= 15;
+        p.size *= 0.9;
+        
+        let c = shieldActive ? color(0, 200, 255) : color(0, 255, 204);
+        c.setAlpha(p.life);
+        fill(c);
+        circle(p.x, p.y, p.size);
+        
+        if (p.life <= 0) cursorTrailParticles.splice(i, 1);
+      }
+    }
+
+    // 繪製科技感游標
     function drawCursor(x, y) {
       push();
       translate(x, y);
       
-      // 繪製拖尾
-      noStroke();
-      for (let i = 0; i < trail.length; i++) {
-          let pos = trail[i];
-          let size = map(i, 0, trail.length, 5, 30);
-          let alpha = map(i, 0, trail.length, 0, 150);
-          // 如果有護盾，拖尾變藍色，否則為金色
-          fill(shieldActive ? 0 : 255, shieldActive ? 200 : 215, shieldActive ? 255 : 0, alpha);
-          ellipse(pos.x - x, pos.y - y, size, size);
-      }
-
-      // 繪製主體光環
-      rotate(frameCount * 0.08);
-      noFill();
-      strokeWeight(shieldActive ? 6 : 4);
-      // 護盾狀態下光環變藍色且更大
-      stroke(shieldActive ? 0 : 255, shieldActive ? 200 : 215, shieldActive ? 255 : 0, 200); 
-      ellipse(0, 0, shieldActive ? 70 : 50, shieldActive ? 70 : 50);
+      let baseColor = shieldActive ? color(0, 200, 255) : color(0, 255, 204);
       
-      // 內部核心
-      rotate(-frameCount * 0.04);
+      // 外圈旋轉光環
+      rotate(frameCount * 0.1);
+      noFill();
+      strokeWeight(3);
+      stroke(baseColor);
+      drawingContext.setLineDash([10, 15]); // 虛線效果
+      ellipse(0, 0, shieldActive ? 80 : 60, shieldActive ? 80 : 60);
+      drawingContext.setLineDash([]); // 重設
+      
+      // 內圈反向旋轉
+      rotate(-frameCount * 0.2);
       strokeWeight(2);
+      stroke(255, 200);
       rectMode(CENTER);
-      rect(0, 0, 25, 25);
+      rect(0, 0, 20, 20);
+      
+      // 中心發光點
+      noStroke();
+      fill(255);
+      circle(0, 0, 8);
       
       pop();
     }
 
     function drawUI() {
       textAlign(LEFT, TOP);
-      textSize(24);
       
-      // 分數與關卡
+      // 分數與關卡 (增加陰影提升質感)
+      fill(0, 0, 0, 150);
+      rect(10, 10, 150, 70, 10);
+      
       fill(255, 215, 0);
-      text(`分數: ${score}`, 20, 20);
+      textSize(24);
+      text(`SCORE: ${score}`, 20, 15);
       textSize(18);
       fill(0, 255, 255);
-      text(`LEVEL ${level}`, 20, 50);
+      text(`LEVEL ${level}`, 20, 45);
       
       // 生命值
       let hearts = "❤️".repeat(lives);
-      textSize(24);
-      text(`${hearts}`, 20, 80);
+      textSize(22);
+      text(`${hearts}`, 20, 90);
       
-      // 連擊顯示
+      // 連擊特效顯示
       if (combo > 1) {
           textAlign(CENTER, TOP);
-          textSize(32);
-          fill(255, 100, 50);
-          // 文字跳動效果
-          let bounce = sin(frameCount * 0.2) * 5;
+          textSize(40);
+          let comboColor = combo > 5 ? color(255, 50, 50) : color(255, 150, 0);
+          fill(comboColor);
+          
+          let bounce = sin(frameCount * 0.3) * (combo * 0.5); // 連擊越高跳動越劇烈
           text(`${combo} COMBO!`, width / 2, 20 + bounce);
-          // 連擊計時條
+          
+          // 計時條
           noStroke();
-          fill(255, 100, 50, 150);
+          fill(comboColor.levels[0], comboColor.levels[1], comboColor.levels[2], 150);
+          rectMode(CENTER);
+          rect(width/2, 70, map(comboTimer, 0, COMBO_TIME_LIMIT, 200, 0), 8, 4);
           rectMode(CORNER);
-          rect(width/2 - 50, 60, map(comboTimer, 0, COMBO_TIME_LIMIT, 100, 0), 10);
       }
 
-      // 護盾剩餘時間條
+      // 護盾狀態
       if (shieldActive) {
-          rectMode(CORNER);
-          noStroke();
           fill(0, 200, 255, 150);
-          rect(20, 120, map(shieldTimer, 0, SHIELD_DURATION, 150, 0), 15);
+          rect(20, 130, map(shieldTimer, 0, SHIELD_DURATION, 120, 0), 10, 5);
           fill(255);
-          textSize(14);
-          textAlign(LEFT, CENTER);
-          text("SHIELD", 25, 127);
+          textSize(12);
+          text("SHIELD ACTIVE", 20, 115);
       }
-      
-      // 升級訊息
-      if (levelUpMessageTimer > 0) {
-          textAlign(CENTER, CENTER);
-          textSize(64);
-          fill(0, 255, 255, map(levelUpMessageTimer, 0, 120, 0, 255));
-          text("LEVEL UP!", width/2, height/2 - 50);
-      }
-
-      textAlign(CENTER, CENTER); // Reset
+      textAlign(CENTER, CENTER);
     }
 
+    // 爆炸粒子生成器
+    function createBurstParticles(px, py, pcolor, count) {
+      for (let i = 0; i < count; i++) {
+        let angle = random(TWO_PI);
+        let speed = random(1, 8);
+        particles.push({
+          x: px, y: py,
+          vx: cos(angle) * speed, vy: sin(angle) * speed,
+          life: 255, color: pcolor, size: random(3, 10)
+        });
+      }
+    }
+
+    function updateParticles() {
+      for (let i = particles.length - 1; i >= 0; i--) {
+        let p = particles[i];
+        p.x += p.vx; p.y += p.vy;
+        p.life -= 10;
+        p.vx *= 0.95; // 摩擦力減速
+        p.vy *= 0.95;
+        
+        noStroke();
+        let c = color(p.color);
+        c.setAlpha(p.life);
+        fill(c);
+        circle(p.x, p.y, p.size * (p.life/255));
+        if (p.life <= 0) particles.splice(i, 1);
+      }
+    }
+
+    // 畫面受擊干擾特效 (Glitch)
+    function drawGlitchEffect() {
+      fill(255, 0, 0, 50);
+      rect(0, 0, width, height);
+      for (let i = 0; i < 5; i++) {
+        fill(255, 255, 255, random(50, 150));
+        noStroke();
+        rect(0, random(height), width, random(5, 20));
+      }
+    }
+
+    // ==========================================
+    // 遊戲流程畫面
+    // ==========================================
     function drawStartScreen() {
       fill(255);
       textSize(42);
-      text("🚀 星空大冒險 2.0 🚀", width / 2, height / 2 - 80);
+      text("🚀 星空大冒險 3.0 🚀", width / 2, height / 2 - 80);
       
       textSize(18);
       fill(200, 255, 255);
-      text("用食指控制光環", width / 2, height / 2 - 20);
+      text("用食指引導光環，保持連擊獲得高分！", width / 2, height / 2 - 20);
       text("⭐接星得點 | 💣避開炸彈", width / 2, height / 2 + 10);
       fill(255, 100, 100);
-      text("💖補血 | 🛡️護盾無敵", width / 2, height / 2 + 40);
+      text("💖補血 | 🛡️護盾無敵(可彈飛炸彈)", width / 2, height / 2 + 40);
       
-      fill(0, 255, 204, map(sin(frameCount * 0.1), -1, 1, 150, 255));
+      fill(0, 255, 204, map(sin(frameCount * 0.1), -1, 1, 100, 255));
       textSize(24);
-      text("將食指移到這裡開始", width / 2, height / 2 + 130);
+      text("⚡ 觸碰此處啟動引擎 ⚡", width / 2, height / 2 + 130);
       
+      updateAndDrawTrail();
       drawCursor(cursorX, cursorY);
       
       if (dist(cursorX, cursorY, width / 2, height / 2 + 130) < 50) {
@@ -421,22 +527,24 @@
     }
 
     function drawGameOverScreen() {
-      fill(20, 0, 0, 200);
+      fill(20, 0, 0, 220);
       rect(0, 0, width, height);
       
       fill(255, 50, 50);
       textSize(56);
-      text("GAME OVER", width / 2, height / 2 - 60);
-      fill(255);
-      textSize(28);
-      text(`最終分數: ${score}`, width / 2, height / 2);
+      text("SYSTEM FAILURE", width / 2, height / 2 - 60);
+      
+      fill(255, 215, 0);
+      textSize(32);
+      text(`SCORE: ${score}`, width / 2, height / 2);
       textSize(20);
       fill(0, 255, 255);
-      text(`抵達關卡: ${level}`, width / 2, height / 2 + 40);
+      text(`REACHED LEVEL: ${level}`, width / 2, height / 2 + 40);
       
       fill(0, 255, 204, map(sin(frameCount * 0.1), -1, 1, 150, 255));
-      text("移動到這裡重新挑戰", width / 2, height / 2 + 120);
+      text("▶ 觸碰此處重新啟動 ◀", width / 2, height / 2 + 120);
       
+      updateAndDrawTrail();
       drawCursor(cursorX, cursorY);
       
       if (dist(cursorX, cursorY, width / 2, height / 2 + 120) < 50) {
@@ -445,40 +553,12 @@
       }
     }
 
-    // ==========================================
-    // 工具函式
-    // ==========================================
     function resetGame() {
       score = 0; lives = 3; level = 1;
       combo = 0; comboTimer = 0;
       shieldActive = false; shieldTimer = 0;
-      items = []; particles = []; trail = [];
-    }
-
-    function createParticles(px, py, pcolor, count = 15) {
-      for (let i = 0; i < count; i++) {
-        particles.push({
-          x: px, y: py,
-          vx: random(-5, 5), vy: random(-5, 5),
-          life: 255,
-          color: pcolor,
-          size: random(4, 12)
-        });
-      }
-    }
-
-    function updateParticles() {
-      for (let i = particles.length - 1; i >= 0; i--) {
-        let p = particles[i];
-        p.x += p.vx; p.y += p.vy;
-        p.life -= 8;
-        noStroke();
-        let c = color(p.color);
-        c.setAlpha(p.life);
-        fill(c);
-        circle(p.x, p.y, p.size * (p.life/255));
-        if (p.life <= 0) particles.splice(i, 1);
-      }
+      items = []; particles = []; cursorTrailParticles = [];
+      screenShakeTime = 0; glitchEffectTime = 0;
     }
   </script>
 </body>
